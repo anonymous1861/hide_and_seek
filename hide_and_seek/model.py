@@ -160,45 +160,37 @@ class hide_and_seek(nn.Module):
         mask = self.net_hide(true_x)
         y_pred = self.net_seek(true_x, marginals_x, mask)
         return y_pred, mask
-    
-# def compute_mean_binary_entropy(probs, eps=1e-10,
-#                    ):
-#     """
-#     Compute entropy of a tensor of probabilities.
-    
-#     Args:
-#         probs (torch.Tensor): Tensor of probabilities (values between 0 and 1).
-#         eps (float): Small value to avoid log(0).
-    
-#     Returns:
-#         torch.Tensor: Scalar entropy value.
-#     """
-#     # Clip probabilities to avoid log(0) and ensure numerical stability
-#     clipped_probs = torch.clamp(probs, min=eps, max=1.0 - eps)
-    
-#     # Compute entropy: -sum(p * log(p))
-#     entropy = - clipped_probs * torch.log(clipped_probs) - (1 - clipped_probs) * torch.log(1 - clipped_probs)
-
-#     return entropy.mean()
-    
+        
 def loss_mse(y_pred, y_true):
     """Calculate mean squared error between predictions and true values."""
-    return torch.mean((y_pred - y_true) ** 2) #TODO: check if this is correct for single target vs multitarget
+    
+    mse_loss = F.mse_loss(y_pred, y_true) #TODO: check if this is correct for single target vs multitarget
+    
+    return mse_loss
 
 def loss_mse_with_mask_penalty(y_pred, 
                                y_true, 
                                mask, 
                                lmbda, 
-                               is_tensor=True):
+                               epoch,
+                                n_epochs,
+                                lmbda_exponent=2,
+                                return_separate_losses=False
+                               ):
 
-    if is_tensor == True:
-        pred_mse_per_row = torch.mean((y_pred - y_true) ** 2, dim=1)
-        mask_mean_size_per_row = mask.mean(dim=1)
-    else:
-        pred_mse_per_row = np.mean((y_pred - y_true) ** 2) #note difference to above - maybe fix in future edit (single target vs multitarget)
-        mask_mean_size_per_row = mask.mean(axis=1)
+    mse_loss = F.mse_loss(y_pred, y_true)
     
-    return (pred_mse_per_row + lmbda * mask_mean_size_per_row).mean()
+    mask_mean_size = mask.mean(dim=1).mean()
+
+    if epoch is not None and n_epochs is not None:
+        # Adjust lambda dynamically based on epoch
+        lmbda = lmbda * (epoch / n_epochs)**(lmbda_exponent)
+
+    if return_separate_losses == False:
+        return mse_loss + lmbda * mask_mean_size
+    elif return_separate_losses == True:
+        #this is used for analysis of the validation dataset
+        return mse_loss, mask_mean_size
 
 def cross_entropy(y_pred, 
                     y_true, 
@@ -231,8 +223,6 @@ def custom_cross_entropy(y_pred,
         # Adjust lambda dynamically based on epoch
         lmbda = lmbda * (epoch / n_epochs)**(lmbda_exponent)
     
-    # if baseline_loss is not None: #no longer using baseline loss
-        # return ce_loss/baseline_loss + lmbda * (mask_mean_size)
     if return_separate_losses == False:
         return ce_loss + lmbda * mask_mean_size
     elif return_separate_losses == True:
@@ -302,7 +292,7 @@ def train_nn(X_train,
 
     # ==== 4. Train the model ====
     
-    if batch_size is None:
+    if batch_size is None: #this is the setting used in experiments. 
         if return_losses_on_val == True:
             n_val = int(0.1 * X_train_tensor.size(0))
             X_val_tensor = X_train_tensor[:n_val].clone()
@@ -366,9 +356,13 @@ def train_nn(X_train,
                         loss = loss_mse_with_mask_penalty(y_pred=y_pred_train, 
                                                     y_true=y_train_tensor, 
                                                     mask=mask_train,
-                                                    lmbda=lmbda
-                                                    ) #TODO: add baseline_loss here
-                elif task == 'classification': #this is what was used in the experiments
+                                                    lmbda=lmbda,
+                                                    epoch=epoch,
+                                                    n_epochs=n_epochs,
+                                                    lmbda_exponent=lmbda_exponent
+                                                    )
+                        
+                elif task == 'classification':
                     loss = custom_cross_entropy(y_pred=y_pred_train, 
                                                 y_true=y_train_tensor_actual, 
                                                 mask=mask_train, 
@@ -385,9 +379,11 @@ def train_nn(X_train,
 
             model.eval()
             if return_losses_on_val == True:
+                #not yet ready for regression
                 with torch.no_grad():
                     y_pred_val, mask_val = model(true_x=X_val_tensor,
                                                 marginals_x=X_val_tensor_shuffled)
+                    
                     val_ce_loss, val_mask_mean_size = custom_cross_entropy(y_pred=y_pred_val,
                                                     y_true=y_val_tensor,
                                                     mask=mask_val,
@@ -404,9 +400,6 @@ def train_nn(X_train,
                     epoch_losses_on_val['lmbda_exponent'] = lmbda_exponent
 
                     losses_on_val[epoch] = epoch_losses_on_val
-            
-            # Step scheduler
-            # scheduler.step()
 
             if (epoch % (n_epochs/5) == 0) or (epoch == n_epochs - 1):
                 if return_losses_on_val == True:
@@ -420,12 +413,12 @@ def train_nn(X_train,
                     print(f"{print_description} | Epoch: {epoch} | Loss: {loss.item():.4f}")
             
     else: #batching - not used in experiments. Could be improved.
-
+        #not yet ready for regression
         for epoch in range(n_epochs):
             model.train()
             total_loss = 0
             
-            if train_baseline == True: #baseline model - not used in experiments
+            if train_baseline == True:
                 #might need to update this after having changed batch shuffle set up above and below
                 for X_batch, idxs_batch, y_batch in dataloader:
                     X_batch = X_batch.to(DEVICE)
@@ -450,7 +443,7 @@ def train_nn(X_train,
                     optimizer.step()
                     total_loss += loss.item()
 
-            else: #main model - with feature masking
+            else:
                 X_train_tensor_shuffled = shuffle_tensor_cols(X_train_tensor, replace=True, random_state=seed+epoch)
                 dataset = TensorDataset(X_train_tensor, X_train_tensor_shuffled, y_train_tensor)
                 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -467,18 +460,26 @@ def train_nn(X_train,
                                                     marginals_x=X_batch_shuffled)
 
                     if task == 'regression':
-                        loss = loss_mse_with_mask_penalty(y_pred=y_pred_batch,
-                                                        y_true=y_batch,
-                                                        mask=mask_batch,
-                                                        lmbda=lmbda)
-                    elif task == 'classification':
-                        loss = custom_cross_entropy(y_pred=y_pred_batch,
-                                                    y_true=y_batch,
+                        loss = loss_mse_with_mask_penalty(y_pred=y_pred_batch, 
+                                                    y_true=y_batch, 
                                                     mask=mask_batch,
                                                     lmbda=lmbda,
                                                     epoch=epoch,
                                                     n_epochs=n_epochs,
-                                                    lmbda_exponent=lmbda_exponent)
+                                                    lmbda_exponent=lmbda_exponent
+                                                    )
+                        
+                    elif task == 'classification':
+
+                        loss = custom_cross_entropy(y_pred=y_pred_batch, 
+                                                y_true=y_batch, 
+                                                mask=mask_batch, 
+                                                lmbda=lmbda,
+                                                epoch=epoch,
+                                                n_epochs=n_epochs,
+                                                lmbda_exponent=lmbda_exponent
+                                                )
+                    
                     else:
                         raise ValueError("Unsupported task type. Use 'regression' or 'classification'.")
                 
@@ -565,39 +566,3 @@ def shuffle_tensor_cols(X_tensor, replace=False, random_state=None): #I've check
     
     return shuffled
 
-def mse_y(y_pred,
-          y_true,
-                ):
-    """y_true and y_pred are arrays with n x 1 elements
-    This finds the mse element-wise across all elements"""
-
-    sq_error = (y_true-y_pred)**2
-    return sq_error.mean()
-    
-# def report_metrics(y_pred, 
-#                    y_true,
-#                   mask_pred=None,
-#                   mask_true=None,
-#                   lmbda=None,
-#                   is_tensor=False):
-
-#     y_mse = mse_y(y_pred,
-#                         y_true
-#                        )
-    
-#     print(f"y mse: {y_mse.item():.4f}")
-        
-#     if (mask_pred is not None) and (mask_true is not None):
-#         mask_mse = mse_mask(mask_pred,
-#                               mask_true
-#                              )
-
-#         print(f"mask mse: {mask_mse.item():.4f}")
-        
-#         if  (lmbda is not None):
-#             loss = loss_mse_with_mask_penalty(y_pred=y_pred, 
-#                                            y_true=y_true, 
-#                                            mask=mask_pred,
-#                                            lmbda=lmbda,
-#                                               is_tensor=is_tensor)
-#             print(f"combined loss: {loss.item():.4f}")

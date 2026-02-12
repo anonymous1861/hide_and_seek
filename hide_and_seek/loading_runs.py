@@ -25,10 +25,21 @@ def load_pickle(path):
     return loaded_dict
 
 def load_results_from_pickle(folder,
-                            time_threshold=None,
+                            time_threshold=None, #"%y_%m_%d_%H_%M_%S" "25_07_08_14_59_36"
                             keep_run_type=None,
                             is_output=False,
-                            is_synthetic=True): #"%y_%m_%d_%H_%M_%S" "25_07_08_14_59_36"
+                            is_synthetic=True,
+                            rename_dict = {
+                                'hide_and_seek': 'Hide&Seek',
+                                'l2x': 'L2X',
+                                'lime': 'LIME',
+                                'invase': 'INVASE',
+                                'shap_xgboost':'SHAP',
+                                'lasso':"LASSO",
+                                'random_forest':"RForest"
+                                },
+                            numeric_cols = ['lmbda','accuracy', 'roc_auc', 'pr_auc', 'pct_sig']
+                                ):
     
     path2 = f'~/Data/{folder}/*'
     # Create a filesystem instance (local filesystem in this case)
@@ -87,19 +98,27 @@ def load_results_from_pickle(folder,
             all_series.append(series2)
         
     # return all_series
-    iclr_results = pd.concat(all_series, axis=1)
-    iclr_results = iclr_results[sorted(iclr_results.columns)]
-    # if 'run_type' in iclr_results.index:
-    #     iclr_results = iclr_results.drop('run_type')
-    # display(np.round(iclr_results,4))
+    results = pd.concat(all_series, axis=1)
+    results = results[sorted(results.columns)]
+
     priority_order = [
     "syn", "TPR_mean", "FDR_mean", "TPR_std", "FDR_std",
     "roc_auc_score_val", "roc_auc_score_dis",
     "average_precision_score_val", "average_precision_score_dis",
     "accuracy_score_val", "accuracy_score_dis"
     ]
-    iclr_results = order_indices_by_priority(iclr_results, priority_order)
-    return iclr_results
+    results = order_indices_by_priority(results, priority_order)
+    
+    results = results.T
+    results['run_id'] = results.apply(lambda x: str(x['time_run']) + '_' + str(x['run_type']),axis=1)
+    # results['F1'] = results.apply(compute_rowwise_metrics, axis=1)
+    results['model'] = results['model_type'].replace(rename_dict)
+    results['seed'] = results['seed'].astype(int)
+    results['pct_sig'] = results['binary_mask'].apply(lambda x: x.mean(axis=1).mean())
+
+    for col in numeric_cols:
+        results[col] = results[col].astype(float)
+    return results
 
 def performance_metric(score, g_truth): #not used
 
@@ -120,45 +139,6 @@ def performance_metric(score, g_truth): #not used
             Temp_FDR[i] = 100 * float(FDR_Nom)/float(FDR_Den+1e-8)
     
         return np.mean(Temp_TPR), np.mean(Temp_FDR), np.std(Temp_TPR), np.std(Temp_FDR)
-
-
-def tpr_fdr_analysis(df, data_set): #not used
-    data_temp = df.copy()
-    Sel_Prob_Test = pd.DataFrame(data_temp.loc['Sel_Prob_Test', data_set])
-    score = pd.DataFrame(data_temp.loc['score', data_set])
-    g_test = pd.DataFrame(data_temp.loc['g_test', data_set])
-    return Sel_Prob_Test, score, g_test
-
-
-def rank_runs(df): #not used
-    """
-    ranks runs by combination of TPR_mean and FDR_mean
-    groups by time_run. assumes 6 per time_run
-    """
-    
-    cols_to_use = ['time_run', 'TPR_mean', 'FDR_mean', 'hide_hidden_dim', 'seek_hidden_dim', 'hide_num_hidden_layers', 
-'seek_num_hidden_layers', 'epochs', 'lamda','batch_size']
-    
-    df = df.T[cols_to_use]
-    df['score'] = (df['TPR_mean']+(100-df['FDR_mean']))/2
-
-    
-    # Get the counts of each 'time_run'
-    time_run_counts = df.groupby('time_run').size()
-
-    # Find the 'time_run' values with counts not equal to 6
-    time_runs_without_6 = time_run_counts[time_run_counts != 6].index
-    print('runs without 6 - dropping these!')
-    print(time_runs_without_6)
-    
-    # Filter out the rows where 'time_run' is not in the list of those without 6
-    df_filtered = df[~df['time_run'].isin(time_runs_without_6)]
-    
-    df_filtered = df_filtered.groupby('time_run').mean()
-    df_filtered = df_filtered.sort_values(by='score',ascending=False)
-    print('\nbest run:')
-    print(df_filtered.index[0])
-    return df_filtered[['score'] + [col for col in cols_to_use if col != 'time_run']]
 
 
 def compute_rowwise_metrics(row, just_f1=True):

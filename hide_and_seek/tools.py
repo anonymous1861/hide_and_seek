@@ -9,6 +9,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_sco
 
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from hide_and_seek.Data_Generation import generate_data
@@ -128,10 +129,12 @@ def compute_f1(binary_mask, g_truth):
 def prediction_metrics(y_true, y_pred_probs,
                       verbose=False):
     """
-    y_true: 1D array of labels (e.g., [0, 1, 2, 0...])
-    y_pred_probs: 2D array of probabilities (batch_size, num_classes)
+    y_true: 1D array of labels (N,) or one-hot (N, C)
+    y_pred_probs: 2D array of probabilities (N, C)
     """
-    y_true = y_true.argmax(axis=1) if y_true.ndim == 2 else y_true #if one-hot encoded
+    # If one-hot encoded, convert to class indices
+    y_true = y_true.argmax(axis=1) if y_true.ndim == 2 else y_true
+    # Predicted labels
     y_pred_labels = y_pred_probs.argmax(axis=1)
     acc = accuracy_score(y_true, y_pred_labels)
 
@@ -139,15 +142,19 @@ def prediction_metrics(y_true, y_pred_probs,
     num_classes = y_pred_probs.shape[1]
     if num_classes == 2:
         # For Binary: use the probability of the positive class (column 1)
-        roc_auc = roc_auc_score(y_true, y_pred_probs[:, 1])
+        p_pos = y_pred_probs[:, 1]
+        roc_auc = roc_auc_score(y_true, p_pos)
+        pr_auc  = average_precision_score(y_true, p_pos)
     else:
         roc_auc = roc_auc_score(y_true, y_pred_probs, multi_class='ovr') #alternative: 'ovo'
-    
+        pr_auc = average_precision_score(y_true, y_pred_probs)
+
     if verbose == True:
         print("Accuracy:", acc)
         print("ROC-AUC:", roc_auc)
+        print("PR-AUC:", pr_auc)
 
-    return acc, roc_auc       
+    return acc, roc_auc, pr_auc       
 
 #%% Performance Metrics
 def performance_metric(binary_mask, g_truth):
@@ -205,7 +212,6 @@ def save_results_as_pickle(results,
                           timestamp='notimestamp'):
     name = f'results_{timestamp}_{syn_type}_{model_type}_{name_end}'
     save_path = f'{os.path.expanduser("~/Data")}/{folder}/{name}.pkl'
-    # save_path = '/Users/25787274/git/hide-and-seek/Data_local'
     with open(save_path, 'wb') as f:
         pickle.dump(results, f)
     print(save_path)
@@ -224,25 +230,22 @@ def find_n_largest_values(arr, n):
     binary_mask[rows, top_idx] = 1
     return binary_mask
 
-def run_feature_selection_models(data_type,
-                                folder,
-                                run_type,
-                                num_important_features=None, #used for all except hide_and_seek and invase
-                                full_data_dict=None, #option to provide x_train, y_train, x_test, y_test, g_test
-                                model_type='invase',
-                                timestamp='notimestamp',
+def run_feature_selection_model(data_type, #if synthetic, must be e.g. "Syn#" for # in {1,...,7}. Otherwise, can be any name.
+                                num_important_features='use_gtruth', #not needed for hide_and_seek, invase, realx. For other models either specify or, for synthetic data, use 'use_gtruth'
+                                full_data_dict=None, #option to provide x_train, y_train, x_test, y_test, g_test for non-synthetic data
+                                model_type='hide_and_seek',
                                 batch_size=None,
-                                epochs=10000,
+                                epochs=500,
                                 lmbda=0.3,
                                 task='classification',
-                                hide_hidden_dim=100, #only used if model_type == 'hide_and_seek'
-                                seek_hidden_dim=200, #only used if model_type == 'hide_and_seek',
-                                hide_num_hidden_layers=1, #only used if model_type == 'hide_and_seek'
-                                seek_num_hidden_layers=1, #only used if model_type == 'hide_and_seek'
-                                pickle_results=True,
-                                return_results=False,
+                                hide_hidden_dim=32, #only used if model_type == 'hide_and_seek'
+                                seek_hidden_dim=32, #only used if model_type == 'hide_and_seek',
+                                hide_num_hidden_layers=2, #only used if model_type == 'hide_and_seek'
+                                seek_num_hidden_layers=2, #only used if model_type == 'hide_and_seek'
+                                folder_for_pickle=None, #location to save pickled results. if None won't pickle. If not none, will save in "~/Data/{folder}". Edit 'save_results_as_pickle' function to change path
+                                return_results=True,
                                 include_model=False,
-                                calculate_TPR_FDR_metrics=True,
+                                calculate_TPR_FDR_metrics=True, #set to false if not providing ground truth feature importance
                                 xgb_params = None,
                                 use_custom_nn_for_lime=False,
                                 train_N = 10_000,
@@ -252,15 +255,28 @@ def run_feature_selection_models(data_type,
                                 num_syn_features = 11,
                                 batchnorm_hs = False,
                                 num_classes = 2,
-                                save_experiment_data = False,
+                                save_experiment_data = True,
                                 lmbda_exponent = 2,
                                 return_losses_on_val=False,
-                                data_mode='synthetic'
+                                data_mode='synthetic', #used for synthetic data. can be 'synthetic' or 'credit_data_val' or 'credit_data_test'. Future improvement: have this work within 'data_type' for simplicity
+                                scale_data=True
                                 ):
-    """
-    'data_mode' can be 'synthetic' or 'credit_data_val' or 'credit_data_test'
-    """
 
+    timestamp_start = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    run_type=(
+            f"m={model_type}_e={epochs}_l={lmbda}_"
+            f"b={batch_size}_seed={seed}_k={num_important_features}_"
+            f"f={num_syn_features}_bn={batchnorm_hs}_"
+            f"p={lmbda_exponent}_"
+            f"vl={return_losses_on_val}_"
+            f"dm={data_mode}"
+        )
+    print(run_type)
+
+    if model_type == 'invase' and (epochs != 10_000 or batch_size != 1_000): raise ValueError("invase usually requires lambda = 0.1, epochs=10_000, batch_size=1_000")
+    if model_type == 'hide_and_seek' and (epochs != 500 or batch_size != None): raise ValueError("hide_and_seek usually requires lambda = 0.3, epochs=500, batch_size=None")
+    if model_type == 'realx' and (epochs != 500 or batch_size != 1000): raise ValueError("realx baseline usually requires uses epochs=500, batch_size=1000")
+    
     train_seed = seed
     test_seed = seed + 1
 
@@ -292,15 +308,15 @@ def run_feature_selection_models(data_type,
                                             )
     
     scaled_in_tools = False
-    if model_type not in ['lasso']: #have now removed scaler from all models except lasso. scaling happens here.
-        print("SCALING IN TOOLS")
-        print("SCALING IN TOOLS")
-        print("SCALING IN TOOLS")
+    if scale_data == True:
+        print("scaling data")
         from sklearn.preprocessing import StandardScaler
         scaler = StandardScaler()
         x_train = scaler.fit_transform(x_train)
         x_test = scaler.transform(x_test)
         scaled_in_tools = True
+    else:
+        print("not scaling data")
 
     baseline_loss = None
     #baseline model - no feature masking
@@ -329,8 +345,8 @@ def run_feature_selection_models(data_type,
         baseline_model = baseline_model['model']
         baseline_model = baseline_model.cpu()
 
-    if num_important_features is None:
-        #num_important_features is used for all models except hide_and_seek and invase
+    if num_important_features == 'use_gtruth':
+        #num_important_features is needed for all models except hide_and_seek, invase, realx
         num_important_features = np.max(g_test.astype(bool).sum(axis=1)) #max possible number of important features across all instances
         print("num_important_features: ",num_important_features)
 
@@ -343,7 +359,7 @@ def run_feature_selection_models(data_type,
 
     if model_type == 'invase':
         assert y_train.ndim == 2
-        from INVASE_master_ICLR.INVASE import PVS
+        from INVASE_master.INVASE import PVS
         import tensorflow as tf
         model = PVS(x_train, data_type,
                     batch_size=batch_size,
@@ -379,9 +395,7 @@ def run_feature_selection_models(data_type,
         realx_metrics = ['acc', 'AUC']
 
         input_shape = x_train.shape[1]
-        # y_train = tf.keras.utils.to_categorical(y_train, num_classes)
-        # y_test = tf.keras.utils.to_categorical(y_test, num_classes)
-        
+
         model_input = Input(shape=(input_shape,), dtype='float32')
         out = Dense(100, activation='relu', kernel_regularizer=regularizers.l2(1e-3))(model_input)
         out = Dense(100, activation='relu', kernel_regularizer=regularizers.l2(1e-3))(out)
@@ -424,14 +438,11 @@ def run_feature_selection_models(data_type,
 
         #2. Get Predictions
         y_score = realx.predict(x_test, realx_batch_size)
-        # y_pred = y_score.argmax(1)
-        # y_test_num = y_test.argmax(1)
 
         #custom additions
         realx_y_test_pred = y_score
         mask = score.copy()
         binary_mask = score.copy()
-        # print(score)
 
     elif model_type == 'hide_and_seek':
         from hide_and_seek.model import train_nn, pred_nn
@@ -604,15 +615,13 @@ def run_feature_selection_models(data_type,
 
         #predictions for saving
         xgb_y_test_pred = model.predict(xgb.DMatrix(x_test))
-        xgb_y_test_pred = np.vstack([xgb_y_test_pred,1-xgb_y_test_pred]).T
+        xgb_y_test_pred = np.vstack([1-xgb_y_test_pred,xgb_y_test_pred]).T #used to stack in swapped order. now updated
 
     elif model_type == 'lasso':
         from sklearn.linear_model import LogisticRegression
-        from sklearn.preprocessing import StandardScaler
         from sklearn.pipeline import make_pipeline
 
-        model = make_pipeline(
-                        StandardScaler(),
+        model = make_pipeline( #moved scaling above
                         LogisticRegression(
                             penalty='l1',
                             solver='liblinear',   # supports L1
@@ -722,9 +731,9 @@ def run_feature_selection_models(data_type,
                                                               g_truth=g_test)
         f1 = compute_f1(binary_mask=binary_mask, g_truth=g_test)
 
-        print(f'{data_type}: ' + 'TPR mean: ' + str(np.round(TPR_mean,1)) + '\%') # + 'TPR std: ' + str(np.round(TPR_std,1)) + '\%, '  
-        print(f'{data_type}: ' + 'FDR mean: ' + str(np.round(FDR_mean,1)) + '\%' ) #  + 'FDR std: ' + str(np.round(FDR_std,1)) + '\%, '  
-        print(f'{data_type}: ' + 'F1 mean: ' + str(np.round(f1,1)) + '\%')
+        print(f'{data_type}: ' + 'TPR mean: ' + str(np.round(TPR_mean,1)) + '%') # + 'TPR std: ' + str(np.round(TPR_std,1)) + '\%, '  
+        print(f'{data_type}: ' + 'FDR mean: ' + str(np.round(FDR_mean,1)) + '%') # + 'FDR std: ' + str(np.round(FDR_std,1)) + '\%, '  
+        print(f'{data_type}: ' + 'F1 mean: ' + str(np.round(f1,1)) + '%')
 
         results['TPR_mean']=TPR_mean
         results['FDR_mean']=FDR_mean
@@ -733,12 +742,13 @@ def run_feature_selection_models(data_type,
         
         results['f1'] = f1
     
-    acc, roc_auc = prediction_metrics(y_true=y_test, 
+    acc, roc_auc, pr_auc = prediction_metrics(y_true=y_test, 
                                        y_pred_probs=y_test_pred, 
                                       verbose=False)
     
     results['accuracy']=acc
     results['roc_auc']=roc_auc
+    results['pr_auc'] = pr_auc
 
     results['batch_size'] = batch_size
     results['save_experiment_data'] = save_experiment_data
@@ -787,63 +797,25 @@ def run_feature_selection_models(data_type,
     results['batchnorm_hs'] = batchnorm_hs
     results['num_classes'] = num_classes
     results['num_syn_features'] = num_syn_features
-    results['train_N'] = train_N
+    results['train_N'] = len(x_train)
     results['data_mode'] = data_mode
     results['scaled_in_tools'] = scaled_in_tools
     
     results['run_type']=run_type
-    results['time_run']=timestamp
+    results['time_run']=timestamp_start
     timestamp_end = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     results['time_end']=timestamp_end
 
-    if pickle_results == True:
+    if folder_for_pickle is not None:
+        print("saving results as pickle")
         save_results_as_pickle(results=results,
                             syn_type=data_type,
                             model_type=model_type,
-                            folder=folder,
+                            folder=folder_for_pickle,
                             name_end=run_type,
-                            timestamp=timestamp)
+                            timestamp=timestamp_start)
     if return_results == True:
         return results
-
-    # if model_type == 'invase':    
-    #     #%% Prediction Results
-    #     Predict_Out = np.zeros([20,3,2])    
-
-    #     for i in range(20):
-            
-    #         # different teat seed
-    #         test_seed = i+2
-    #         _, _, _, x_test, y_test, _ = create_data(data_type, data_out)  
-                    
-    #         # 1. Get the selection probability on the testing set
-    #         mask = model.output(x_test)
-        
-    #         # 2. Selected features
-    #         binary_mask = 1.*(mask > 0.5)
-        
-    #         # 3. Prediction
-    #         xs = {}
-    #         if use_marginal == True:
-    #             xs['x_marginals'] = shuffle_numpy_cols(x_test, replace=True, random_state=test_seed)
-            
-    #         xs['x']= x_test
-    #         val_predict, dis_predict = model.get_prediction(xs, binary_mask)
-            
-    #         # 4. Prediction Results
-    #         Predict_Out[i,0,0] = roc_auc_score(y_test[:,1], val_predict[:,1])
-    #         Predict_Out[i,1,0] = average_precision_score(y_test[:,1], val_predict[:,1])
-    #         Predict_Out[i,2,0] = accuracy_score(y_test[:,1], 1. * (val_predict[:,1]>0.5) )
-        
-    #         Predict_Out[i,0,1] = roc_auc_score(y_test[:,1], dis_predict[:,1])
-    #         Predict_Out[i,1,1] = average_precision_score(y_test[:,1], dis_predict[:,1])
-    #         Predict_Out[i,2,1] = accuracy_score(y_test[:,1], 1. * (dis_predict[:,1]>0.5) )
-                
-    #     # Mean / Var of 20 different testing sets
-    #     Output = np.round(np.concatenate((np.mean(Predict_Out,0),np.std(Predict_Out,0)),axis = 1),4) 
-    #     results['Output'] = Output
-    #     print(Output)
-        
 
 
     

@@ -6,7 +6,7 @@ from tqdm import tqdm
 import gc
 import sys
 
-from tools import run_feature_selection_models, parse_args
+from tools import run_feature_selection_model, parse_args
 
 if __name__ == '__main__':
     args = parse_args(lmbda_default=0.1, 
@@ -52,44 +52,31 @@ if __name__ == '__main__':
 
     print(f"Running with seed={seed}, lmbda={lmbda}")
 
-    single_data_set=False
+    single_data_set=True
     # syn_idx = 3 #use params instead if needing to run one syn at a time e.g. for 1_000_000 training samples
 
-    pickle_results=True
     data_sets = ['Syn1','Syn2','Syn3','Syn4','Syn5','Syn6']
-    folder = 'AI_STATS_normalized/synthetic/invase11'#None#'ICML_val_losses'
-    model_type = "invase"
+    folder_for_pickle = 'AI_STATS_normalized/1e6'#None#'ICML_val_losses'
+    model_type = "realx"
     task = 'classification'
     save_experiment_data = True
     
-    num_important_features = None
+    num_important_features = 'use_gtruth'
     # num_important_features_s = [3,4]
     
-    if model_type == 'invase' and (epochs != 10_000 or batch_size != 1_000 or lmbda != 0.1): raise ValueError("invase usually requires lambda = 0.1, epochs=10_000, batch_size=1_000")
-    if model_type == 'hide_and_seek' and (epochs != 500 or batch_size != None or lmbda != 0.3): raise ValueError("hide_and_seek usually requires lambda = 0.3, epochs=500, batch_size=None")
+    if model_type == 'invase' and (lmbda != 0.1): raise ValueError("invase usually requires lambda = 0.1")
+    if model_type == 'hide_and_seek' and (lmbda != 0.3): raise ValueError("hide_and_seek usually requires lambda = 0.3")
     if model_type == 'lime' and (epochs != 500 or batch_size != None): raise ValueError("lime baseline usually requires uses epochs=500, batch_size=None")
-    if model_type == 'realx' and (epochs != 500 or batch_size != 1_000 or lmbda != 0.15): raise ValueError("realx baseline usually requires uses epochs=500, batch_size=1000")
+    if model_type == 'realx' and (lmbda != 0.15): raise ValueError("realx usually requires lmbda = 0.15")
     if num_syn_features != 11:
         print("WARNING NOT TESTING ON STANDARD NUMBER OF SYN FEATURES")
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    run_type=(
-            f"m={model_type}_e={epochs}_l={lmbda}_"
-            f"b={batch_size}_seed={seed}_k={num_important_features}_"
-            f"f={num_syn_features}_bn={batchnorm_hs}_"
-            f"p={lmbda_exponent}_"
-            f"vl={return_losses_on_val}_"
-            f"dm={data_mode}"
-        )
-    print(run_type)
     
     if single_data_set == True:
         data_set = data_sets[syn_idx]
-        results = run_feature_selection_models(data_type=data_set, 
-                            folder=folder,
-                            run_type=run_type,
+        results = run_feature_selection_model(data_type=data_set, 
+                            folder_for_pickle=folder_for_pickle,
                             num_important_features=num_important_features,
                             model_type=model_type,
-                            timestamp=timestamp,
                             batch_size=batch_size,
                             epochs=epochs,
                             lmbda=lmbda,
@@ -98,7 +85,6 @@ if __name__ == '__main__':
                             seek_hidden_dim=seek_hidden_dim, 
                             hide_num_hidden_layers=hide_num_hidden_layers, 
                                 seek_num_hidden_layers=seek_num_hidden_layers,
-                                pickle_results=pickle_results,
                                 train_N = train_N,
                                 test_N = test_N,
                                 seed=seed,
@@ -122,12 +108,10 @@ if __name__ == '__main__':
     else:
         print('running in parallel')
         results_list = Parallel(n_jobs=len(data_sets))(
-        delayed(run_feature_selection_models)(data_type=data_set, 
-                                folder=folder,
-                                run_type=run_type,
+        delayed(run_feature_selection_model)(data_type=data_set, 
+                                folder_for_pickle=folder_for_pickle,
                                 num_important_features=num_important_features,
                                 model_type=model_type,
-                                timestamp=timestamp,
                                 batch_size=batch_size,
                                 epochs=epochs,
                                 lmbda=lmbda,
@@ -136,7 +120,6 @@ if __name__ == '__main__':
                                 seek_hidden_dim=seek_hidden_dim, 
                                 hide_num_hidden_layers=hide_num_hidden_layers, 
                                     seek_num_hidden_layers=seek_num_hidden_layers,
-                                    pickle_results=pickle_results,
                                     train_N = train_N,
                                 test_N = test_N,
                                 seed=seed,
